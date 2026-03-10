@@ -11,19 +11,20 @@ S3 triggers → AWS Lambda
 Lambda analyzes carbon intensity  
 Job scheduled in region with lowest emissions
 ## System Architecture
-'''
+
+```
 Job File Upload
-      ↓
-   Amazon S3
-      ↓
+        ↓
+      Amazon S3
+        ↓
    AWS Lambda Trigger
-      ↓
+        ↓
 Carbon Optimization Logic
-      ↓
+        ↓
 Optimal Region Selected
-      ↓
-   Job Scheduling
-   '''
+        ↓
+    Job Scheduling
+```
   ## Project Structure
 '''
 carbon-aware-scheduler
