@@ -26,7 +26,7 @@ Optimal Region Selected
     Job Scheduling
 ```
   ## Project Structure
-'''
+```
 carbon-aware-scheduler
 │
 ├── lambda
@@ -36,7 +36,7 @@ carbon-aware-scheduler
 │   └── jobs_sample.csv       # Example job input
 │
 └── README.md 
-'''
+```
 ## Technologies Used
 
 - Python
