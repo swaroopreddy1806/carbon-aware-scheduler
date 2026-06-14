@@ -1,107 +1,216 @@
 import pymysql
-import boto3
 import csv
-import os
-from datetime import datetime
 import io
+import boto3
+from datetime import datetime
 
-# ---------- DATABASE CONFIG ----------
-DB_HOST = os.environ.get("DB_HOST")
-DB_USER = os.environ.get("DB_USER")
-DB_PASSWORD = os.environ.get("DB_PASSWORD")
+# ---------- DB CONFIG ----------
+DB_HOST = "carbon-scheduler-db.ci588meqwfkv.us-east-1.rds.amazonaws.com"
+DB_USER = "admin"
+DB_PASSWORD = "Ssr180605"
 DB_NAME = "carbon_scheduler"
 
 s3 = boto3.client('s3')
 
+
+# ---------- DB CONNECTION ----------
+def get_connection():
+    print("🔵 Connecting to DB...")
+    
+    conn = pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        port=3306,
+        autocommit=True,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+    
+    print("🟢 DB Connected")
+    return conn
+
+
 # ---------- LOAD CARBON DATA ----------
-def load_carbon_data(bucket):
-
-    # Demo carbon intensity data
-    return {
-        "India": [
-            {"month": 1, "day": 5, "hour": 9, "carbon": 450.25},
-            {"month": 1, "day": 5, "hour": 10, "carbon": 430.10},
-            {"month": 1, "day": 5, "hour": 11, "carbon": 420.00},
-        ],
-        "Germany": [
-            {"month": 1, "day": 5, "hour": 9, "carbon": 180.50},
-            {"month": 1, "day": 5, "hour": 10, "carbon": 150.20},
-            {"month": 1, "day": 5, "hour": 11, "carbon": 137.95},
-        ]
-    }
-
-# ---------- OPTIMIZATION ----------
-def optimize_job(job, carbon_data):
-
-    submission = datetime.strptime(job['submission_time'], "%Y-%m-%d %H:%M:%S")
-    deadline = datetime.strptime(job['deadline_time'], "%Y-%m-%d %H:%M:%S")
-
-    baseline_country = "India"
-    baseline_carbon = None
-
-    optimized_country = None
-    optimized_carbon = float("inf")
-    optimized_hour = None
-
-    for country, records in carbon_data.items():
-
-        for entry in records:
-
-            if entry["month"] == submission.month and entry["day"] == submission.day:
-
-                if entry["hour"] <= deadline.hour:
-
-                    if country == baseline_country and baseline_carbon is None:
-                        baseline_carbon = entry["carbon"]
-
-                    if entry["carbon"] < optimized_carbon:
-                        optimized_carbon = entry["carbon"]
-                        optimized_country = country
-                        optimized_hour = entry["hour"]
-
-    scheduled_time = submission.replace(hour=optimized_hour)
-
-    return {
-        "baseline_country": baseline_country,
-        "baseline_carbon": baseline_carbon,
-        "optimized_country": optimized_country,
-        "optimized_carbon": optimized_carbon,
-        "carbon_saved": baseline_carbon - optimized_carbon,
-        "scheduled_time": scheduled_time
-    }
-
-# ---------- LAMBDA HANDLER ----------
-def lambda_handler(event, context):
-
-    bucket = event['Records'][0]['s3']['bucket']['name']
-    key = event['Records'][0]['s3']['object']['key']
-
-    # Only process job uploads
-    if not key.startswith("jobs/"):
-        return {"status": "ignored"}
-
-    carbon_data = load_carbon_data(bucket)
-
+def load_carbon_data(bucket, key):
+    print(f"🌍 Loading: {key}")
+    
     response = s3.get_object(Bucket=bucket, Key=key)
     content = response['Body'].read().decode('utf-8')
-
+    
     reader = csv.DictReader(io.StringIO(content))
 
-    results = []
+    headers = reader.fieldnames
+    print("📊 Headers:", headers)
 
-    for job in reader:
+    time_col = [h for h in headers if "Datetime" in h][0]
+    carbon_col = [h for h in headers if "direct" in h][0]
 
-        result = optimize_job(job, carbon_data)
+    data = []
 
-        results.append({
-            "job_id": job['job_id'],
-            "baseline_country": result['baseline_country'],
-            "optimized_country": result['optimized_country'],
-            "carbon_saved": result['carbon_saved']
-        })
+    for row in reader:
+        try:
+            time_str = row[time_col].split("+")[0].strip()
+            t = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
 
-    return {
-        "status": "completed",
-        "jobs_processed": len(results),
-        "results": results
-    }
+            carbon = float(row[carbon_col])
+
+            data.append({
+                "month": t.month,
+                "day": t.day,
+                "hour": t.hour,
+                "carbon": carbon
+            })
+
+        except:
+            continue
+
+    print(f"✅ Loaded {len(data)} rows")
+    return data
+
+
+# ---------- LAMBDA ----------
+def lambda_handler(event, context):
+
+    print("🚀 Lambda started")
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # ---------- S3 INPUT ----------
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        key = event['Records'][0]['s3']['object']['key']
+
+        print(f"📦 {bucket} | {key}")
+
+        response = s3.get_object(Bucket=bucket, Key=key)
+        content = response['Body'].read().decode('utf-8')
+        reader = csv.DictReader(io.StringIO(content))
+
+        # ---------- LOAD CARBON DATA ----------
+        carbon_files = {
+            "spain": "spain_2024.csv",
+            "netherlands": "netherlands_2024.csv",
+            "germany": "germany_2024.csv"
+        }
+
+        carbon_data = {}
+        for region, file in carbon_files.items():
+            carbon_data[region] = load_carbon_data(bucket, file)
+
+        count = 0
+
+        # ---------- PROCESS JOBS ----------
+        for job in reader:
+
+            print(f"➡️ Job: {job['job_id']}")
+
+            submission = datetime.strptime(job['submit_time_utc'], "%Y-%m-%d %H:%M:%S")
+            deadline = datetime.strptime(job['deadline_utc'], "%Y-%m-%d %H:%M:%S")
+
+            duration = int(float(job['duration_hours']))
+            energy = float(job['energy_kwh'])
+
+            # ---------- BASELINE ----------
+            # ---------- BASELINE (STANDARD REGION) ----------
+            baseline_region = "germany"
+            baseline_time = submission
+            baseline_carbon = None
+
+            for entry in carbon_data[baseline_region]:
+                if (entry["month"] == submission.month and
+                    entry["day"] == submission.day and
+                    entry["hour"] == submission.hour):
+
+                    baseline_carbon = entry["carbon"]
+                    break
+
+            if baseline_carbon is None:
+                baseline_carbon = 0
+
+            # ---------- OPTIMIZATION ----------
+            best_time = None
+            best_region = None
+            min_carbon = float("inf")
+
+            for region, data in carbon_data.items():
+
+                data = sorted(data, key=lambda x: (x["month"], x["day"], x["hour"]))
+
+                for i in range(len(data) - duration):
+
+                    window = data[i:i+duration]
+
+                    if all(
+                        entry["month"] == submission.month and
+                        entry["day"] == submission.day and
+                        submission.hour <= entry["hour"] <= deadline.hour
+                        for entry in window
+                    ):
+
+                        avg_carbon = sum(e["carbon"] for e in window) / len(window)
+
+                        if avg_carbon < min_carbon:
+                            min_carbon = avg_carbon
+                            best_time = datetime(
+                                submission.year,
+                                submission.month,
+                                submission.day,
+                                window[0]["hour"]
+                            )
+                            best_region = region
+
+            # ---------- FALLBACK ----------
+            if best_time is None:
+                print("⚠️ Fallback used")
+                best_time = submission
+                best_region = baseline_region
+                min_carbon = baseline_carbon
+
+            optimized_carbon = min_carbon
+            carbon_saved = baseline_carbon - optimized_carbon
+
+            # ---------- INSERT ----------
+            query = """
+            INSERT INTO scheduled_jobs 
+            (job_id, submit_time_utc, deadline_utc, duration_hours, energy_kwh,
+             assigned_region, scheduled_time, carbon,
+             baseline_region, baseline_time, baseline_carbon,
+             optimized_carbon, carbon_saved)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """
+
+            cursor.execute(query, (
+                job['job_id'],
+                submission,
+                deadline,
+                duration,
+                energy,
+                best_region,
+                best_time,
+                optimized_carbon,
+                baseline_region,
+                baseline_time,
+                baseline_carbon,
+                optimized_carbon,
+                carbon_saved
+            ))
+
+            print(f"✅ {job['job_id']} | saved={carbon_saved}")
+
+            count += 1
+
+        print(f"🎯 Total jobs: {count}")
+
+        return {
+            "status": "SUCCESS",
+            "jobs": count
+        }
+
+    except Exception as e:
+        print("❌ ERROR:", str(e))
+        return {
+            "status": "FAILED",
+            "error": str(e)
+        }
