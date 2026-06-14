@@ -54,7 +54,7 @@ carbon-aware-scheduler
 
 ## Author
 
-Swaroop Reddy
+P Sai Swaroop Reddy
 
 
 
